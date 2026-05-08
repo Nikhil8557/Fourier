@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Harmonic Projections Pro</title>
+<style>
+:root {
+  --bg: #050505;
+  --panel: #111;
+  --border: #333;
+  --accent: #ffcc33;
+  --ghost: #4a9eff;
+  --text: #999;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  display: flex; flex-direction: column; align-items: center;
+  min-height: 100vh; overflow: hidden;
+}
+#title { position: fixed; top: 20px; font-weight: 300; letter-spacing: 8px; font-size: 11px; text-transform: uppercase; color: #444; }
+canvas { display: block; cursor: crosshair; filter: drop-shadow(0 0 10px rgba(255,204,51,0.1)); }
+#ui {
+  position: fixed; bottom: 30px; width: 100%;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  pointer-events: none;
+}
+#panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  padding: 16px 24px; border-radius: 16px;
+  display: flex; gap: 30px; align-items: center;
+  pointer-events: auto; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+.ctrl { display: flex; flex-direction: column; min-width: 160px; }
+.ctrl label { font-size: 9px; text-transform: uppercase; letter-spacing: 1.5px; color: #666; margin-bottom: 6px; display: flex; justify-content: space-between;}
+.ctrl .val { color: var(--accent); font-family: monospace; }
+input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; height: 20px; cursor: pointer;}
+input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 2px; background: #333; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 14px; width: 14px; border-radius: 50%; background: var(--accent); margin-top: -6px; border: 2px solid var(--panel); }
+button { background: #1a1a1a; border: 1px solid var(--border); color: var(--text); padding: 8px 16px; border-radius: 6px; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; }
+button:hover { background: #252525; border-color: #555; }
+button.prime { background: var(--accent); color: #000; border: none; font-weight: 700; }
+button.prime:hover { background: #fff; }
+button.on { border-color: var(--ghost); color: var(--ghost); box-shadow: 0 0 15px rgba(74, 158, 255, 0.2); }
+#loader {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(5,5,5,0.9);
+  display: none; flex-direction: column; align-items: center; justify-content: center;
+  z-index: 100; backdrop-filter: blur(4px);
+}
+.spinner { width: 40px; height: 40px; border: 3px solid #222; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; margin-bottom: 15px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="title">Harmonic Projections</div>
+
+<div id="loader">
+  <div class="spinner"></div>
+  <div id="loadMsg" style="font-size: 12px; letter-spacing: 2px;">ANALYZING GEOMETRY...</div>
+</div>
+
+<canvas id="c"></canvas>
+
+<div id="ui">
+  <div id="panel">
+    <div class="ctrl">
+      <label>Harmonics <span class="val" id="cVal">0</span></label>
+      <input type="range" id="cSlider" min="1" max="1000" value="250">
+    </div>
+    <div class="ctrl">
+      <label>Speed <span class="val" id="sVal">2</span></label>
+      <input type="range" id="sSlider" min="1" max="50" value="5">
+    </div>
+    <div class="btns" style="display:flex; gap:10px;">
+      <button id="pauseBtn">Pause</button>
+      <button id="circBtn" class="on">Circles</button>
+      <button id="ghostBtn" class="on">Ghosts</button>
+      <button id="uploadBtn" class="prime">Load SVG</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="svgFile" accept=".svg" style="display:none">
+
+<script>
+/**
+ * CORE CONFIG
+ */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+let SZ = Math.min(window.innerHeight * 0.8, window.innerWidth * 0.9);
+canvas.width = canvas.height = SZ;
+
+const tCanvas = document.createElement('canvas');
+tCanvas.width = tCanvas.height = SZ;
+const tCtx = tCanvas.getContext('2d');
+
+let fourier = null;
+let t = 0;
+let isPaused = false;
+let nCirc = 250;
+let speed = 5;
+let showCircles = true;
+let showGhosts = true;
+let lastX = null, lastY = null;
+
+/**
+ * PATH PROCESSING
+ * Takes multiple SVG shapes and connects them into one continuous sequence
+ * using "Hidden Bridges" (Ghost paths).
+ */
+function processPaths(pathGroups) {
+  if (pathGroups.length === 0) return [];
+  
+  const result = [];
+  const used = new Array(pathGroups.length).fill(false);
+  let currentPos = { re: pathGroups[0][0].re, im: pathGroups[0][0].im };
+
+  for (let i = 0; i < pathGroups.length; i++) {
+    let closestIdx = -1;
+    let minDist = Infinity;
+    
+    // Nearest Neighbor Search
+    for (let j = 0; j < pathGroups.length; j++) {
+      if (!used[j]) {
+        const d = Math.hypot(pathGroups[j][0].re - currentPos.re, pathGroups[j][0].im - currentPos.im);
+        if (d < minDist) { minDist = d; closestIdx = j; }
+      }
+    }
+
+    used[closestIdx] = true;
+    const path = pathGroups[closestIdx];
+
+    // Create Ghost Bridge to next start point
+    if (result.length > 0) {
+      const prevPoint = result[result.length - 1];
+      const nextStart = path[0];
+      const bridgeSteps = 20; 
+      for (let s = 1; s <= bridgeSteps; s++) {
+        result.push({
+          re: prevPoint.re + (nextStart.re - prevPoint.re) * (s / bridgeSteps),
+          im: prevPoint.im + (nextStart.im - prevPoint.im) * (s / bridgeSteps),
+          hidden: true
+        });
+      }
+    }
+
+    // Add actual visible path
+    path.forEach(p => result.push({ ...p, hidden: false }));
+    currentPos = path[path.length - 1];
+  }
+
+  // Close the loop back to the very first point
+  const first = result[0];
+  const last = result[result.length - 1];
+  for (let s = 1; s <= 20; s++) {
+    result.push({
+      re: last.re + (first.re - last.re) * (s / 20),
+      im: last.im + (first.im - last.im) * (s / 20),
+      hidden: true
+    });
+  }
+
+  return result;
+}
+
+/**
+ * DISCRETE FOURIER TRANSFORM
+ */
+async function computeDFT(pts) {
+  const N = pts.length;
+  const harmonics = [];
+  
+  // Center coordinates
+  const avgX = pts.reduce((a, b) => a + b.re, 0) / N;
+  const avgY = pts.reduce((a, b) => a + b.im, 0) / N;
+
+  for (let k = 0; k < N; k++) {
+    let re = 0, im = 0;
+    for (let n = 0; n < N; n++) {
+      const phi = (Math.PI * 2 * k * n) / N;
+      const x = pts[n].re - avgX;
+      const y = pts[n].im - avgY;
+      re += x * Math.cos(phi) + y * Math.sin(phi);
+      im += -x * Math.sin(phi) + y * Math.cos(phi);
+    }
+    
+    harmonics.push({
+      freq: k,
+      amp: Math.sqrt(re*re + im*im) / N,
+      phase: Math.atan2(im, re)
+    });
+
+    // Yield to UI thread every 100 harmonics to prevent freezing
+    if (k % 150 === 0) {
+      document.getElementById('loadMsg').textContent = `SOLVING: ${Math.round((k/N)*100)}%`;
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+  
+  // Sort by amplitude so the largest circles are drawn first
+  harmonics.sort((a,b) => b.amp - a.amp);
+  return { harmonics, visibility: pts.map(p => p.hidden), total: N };
+}
+
+function draw() {
+  ctx.fillStyle = '#050505';
+  ctx.fillRect(0, 0, SZ, SZ);
+  
+  if (!fourier) { requestAnimationFrame(draw); return; }
+
+  let x = SZ/2, y = SZ/2;
+  const limit = Math.min(nCirc, fourier.harmonics.length);
+
+  // 1. Calculate and Draw Epicycles
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+  ctx.lineWidth = 1;
+  
+  for (let i = 0; i < limit; i++) {
+    const h = fourier.harmonics[i];
+    const prevX = x, prevY = y;
+    const phi = (h.freq * t) + h.phase;
+    x += h.amp * Math.cos(phi);
+    y += h.amp * Math.sin(phi);
+
+    if (showCircles && h.amp > 0.5) { // Optimization: don't draw tiny circles
+      ctx.beginPath();
+      ctx.arc(prevX, prevY, h.amp, 0, Math.PI * 2);
+      ctx.stroke();
+      
+      // Connector line
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.moveTo(prevX, prevY);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    }
+  }
+  ctx.restore();
+
+  // 2. Persistent Trace Logic
+  if (!isPaused) {
+    // Determine the exact index in the original point array
+    const idx = Math.floor((t / (Math.PI * 2)) * fourier.total) % fourier.total;
+    const isHidden = fourier.visibility[idx];
+
+    if (lastX !== null) {
+      tCtx.lineCap = 'round';
+      tCtx.lineJoin = 'round';
+      
+      if (!isHidden) {
+        // Draw Primary Path
+        tCtx.strokeStyle = '#ffcc33';
+        tCtx.shadowBlur = 2;
+        tCtx.shadowColor = '#ffcc33';
+        tCtx.lineWidth = 1.8;
+        tCtx.setLineDash([]);
+        tCtx.beginPath();
+        tCtx.moveTo(lastX, lastY);
+        tCtx.lineTo(x, y);
+        tCtx.stroke();
+      } else if (showGhosts) {
+        // Draw Ghost Bridge
+        tCtx.strokeStyle = 'rgba(74, 158, 255, 0.3)';
+        tCtx.shadowBlur = 0;
+        tCtx.lineWidth = 0.8;
+        tCtx.setLineDash([2, 4]);
+        tCtx.beginPath();
+        tCtx.moveTo(lastX, lastY);
+        tCtx.lineTo(x, y);
+        tCtx.stroke();
+      }
+    }
+    
+    lastX = x; 
+    lastY = y;
+    
+    // Increment time based on speed
+    const step = (Math.PI * 2 / fourier.total) * speed;
+    t += step;
+
+    // Reset loop
+    if (t >= Math.PI * 2) {
+      t = 0;
+      tCtx.clearRect(0, 0, SZ, SZ);
+      lastX = lastY = null;
+    }
+  }
+
+  ctx.drawImage(tCanvas, 0, 0);
+  requestAnimationFrame(draw);
+}
+
+/**
+ * SVG INPUT HANDLING
+ */
+async function handleSVG(text) {
+  showLoader(true);
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(text, 'image/svg+xml');
+  const elements = doc.querySelectorAll('path, rect, circle, ellipse, polyline, polygon');
+  const pathGroups = [];
+
+  // Create a hidden SVG element to use the browser's native geometry engine
+  const sandbox = document.createElementNS('http://www.w3.org/2000/svg','svg');
+  sandbox.style.position = 'absolute'; sandbox.style.visibility = 'hidden';
+  document.body.appendChild(sandbox);
+
+  elements.forEach(el => {
+    const node = el.cloneNode();
+    sandbox.appendChild(node);
+    try {
+      const len = node.getTotalLength();
+      if (len < 1) return;
+      
+      // Sample density: adjust based on length
+      const samples = Math.max(20, Math.floor(len / 1.5)); 
+      const group = [];
+      for(let i=0; i<=samples; i++) {
+        const pt = node.getPointAtLength((i/samples)*len);
+        group.push({ re: pt.x, im: pt.y });
+      }
+      pathGroups.push(group);
+    } catch(e) { console.error("Element skip:", e); }
+  });
+  document.body.removeChild(sandbox);
+
+  if (pathGroups.length === 0) {
+    alert("No valid paths found in SVG.");
+    showLoader(false);
+    return;
+  }
+
+  const bridgedPoints = processPaths(pathGroups);
+  
+  // Normalize and scale points to fit canvas
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  bridgedPoints.forEach(p => { 
+    minX=Math.min(minX,p.re); maxX=Math.max(maxX,p.re); 
+    minY=Math.min(minY,p.im); maxY=Math.max(maxY,p.im); 
+  });
+  
+  const width = maxX - minX;
+  const height = maxY - minY;
+  const scale = (SZ * 0.75) / Math.max(width, height);
+  
+  const normalized = bridgedPoints.map(p => ({
+    re: (p.re - (minX + maxX)/2) * scale,
+    im: (p.im - (minY + maxY)/2) * scale,
+    hidden: p.hidden
+  }));
+
+  // Run DFT
+  fourier = await computeDFT(normalized);
+  
+  // Update UI
+  const maxH = fourier.harmonics.length;
+  const slider = document.getElementById('cSlider');
+  slider.max = maxH;
+  nCirc = Math.min(maxH, 500); // Default to a reasonable number
+  slider.value = nCirc;
+  document.getElementById('cVal').textContent = nCirc;
+  
+  resetDrawing();
+  showLoader(false);
+}
+
+function resetDrawing() {
+  t = 0; 
+  lastX = null; 
+  lastY = null;
+  tCtx.clearRect(0,0,SZ,SZ);
+}
+
+function showLoader(v) { document.getElementById('loader').style.display = v ? 'flex' : 'none'; }
+
+/**
+ * EVENT LISTENERS
+ */
+document.getElementById('cSlider').oninput = e => {
+  nCirc = parseInt(e.target.value);
+  document.getElementById('cVal').textContent = nCirc;
+  resetDrawing();
+};
+document.getElementById('sSlider').oninput = e => {
+  speed = parseInt(e.target.value);
+  document.getElementById('sVal').textContent = speed;
+};
+document.getElementById('pauseBtn').onclick = function() {
+  isPaused = !isPaused;
+  this.textContent = isPaused ? 'Resume' : 'Pause';
+};
+document.getElementById('circBtn').onclick = function() {
+  showCircles = !showCircles;
+  this.classList.toggle('on', showCircles);
+};
+document.getElementById('ghostBtn').onclick = function() {
+  showGhosts = !showGhosts;
+  this.classList.toggle('on', showGhosts);
+};
+document.getElementById('uploadBtn').onclick = () => document.getElementById('svgFile').click();
+document.getElementById('svgFile').onchange = e => {
+  const f = e.target.files[0];
+  if (f) {
+    const r = new FileReader();
+    r.onload = ev => handleSVG(ev.target.result);
+    r.readAsText(f);
+  }
+};
+
+// Handle window resize
+window.onresize = () => {
+  SZ = Math.min(window.innerHeight * 0.8, window.innerWidth * 0.9);
+  canvas.width = canvas.height = SZ;
+  tCanvas.width = tCanvas.height = SZ;
+  resetDrawing();
+};
+
+/**
+ * INITIAL STARTUP
+ * Create a simple demo shape (A complex parametric flower)
+ */
+(async () => {
+  const pts = [];
+  const total = 400;
+  for (let i = 0; i < total; i++) {
+    const ang = (i/total) * Math.PI * 2;
+    // Cool parametric shape
+    const r = 140 + 40 * Math.sin(ang * 6);
+    pts.push({
+      re: r * Math.cos(ang),
+      im: r * Math.sin(ang),
+      hidden: i > total * 0.8 // Add a ghost segment to the demo
+    });
+  }
+  fourier = await computeDFT(pts);
+  document.getElementById('cVal').textContent = nCirc;
+  draw();
+})();
+</script>
+</body>
+</html>
