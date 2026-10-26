@@ -10,7 +10,7 @@
 ---
 
 ## 📽️ Demo
-
+https://nikhil8557.github.io/Fourier
 <!-- Drop your demo GIF or visual here -->
 <p align="center">
   <img src="./assets/demo.gif" alt="Fourier Epicycles Animation" width="700px" />
